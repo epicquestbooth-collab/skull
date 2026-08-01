@@ -52,14 +52,16 @@
 
       <label class="btn secondary" for="fileInput">📁 Choose a 3D file</label>
       <input id="fileInput" type="file" accept=".glb,.gltf,.stl,.3mf,.obj,.ply" />
+      <button id="sampleBtn" class="btn secondary">🎲 Try a sample model</button>
       <div id="fileName"></div>
 
       <button id="enterAR" class="btn" disabled>🥽 Enter Mixed Reality</button>
 
       <div class="gestures">
         <div class="g"><b>🤏</b>Pinch to place it (surface or mid-air)</div>
+        <div class="g"><b>🤟</b>Pinch NEAR it to grab & move it around</div>
         <div class="g"><b>🙌</b>Two hands: move apart/together to zoom</div>
-        <div class="g"><b>✋</b>One hand: move up/down to tilt, sideways to spin</div>
+        <div class="g"><b>✋</b>One hand (away from it): up/down tilts, sideways spins</div>
       </div>
       <div class="hint">Supports GLB · glTF · STL · 3MF · OBJ · PLY. Enable Hand Tracking on your Quest and set the controllers down.</div>
     </div>
@@ -141,6 +143,7 @@
         hitTestRequested=false; hitTestSource=null; twoGrab=oneGrab=null;});
 
       document.getElementById('fileInput').addEventListener('change',onFilePicked);
+      document.getElementById('sampleBtn').addEventListener('click',loadSample);
       document.getElementById('rotL').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_Y,-Math.PI/12);});
       document.getElementById('rotR').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_Y, Math.PI/12);});
       document.getElementById('tiltU').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_X,-Math.PI/12);});
@@ -185,6 +188,18 @@
 
     function defaultMat(){ return new THREE.MeshStandardMaterial({color:0xc7ccd1, metalness:0.1, roughness:0.6}); }
 
+    // Built-in sample so MR can be tested instantly without downloading a file.
+    function loadSample(){
+      if(placed){ scene.remove(placed); placed=null; }
+      const grp=new THREE.Group();
+      const geo=new THREE.TorusKnotGeometry(0.3,0.09,180,32);
+      const mat=new THREE.MeshStandardMaterial({color:0x0e7c93, metalness:0.35, roughness:0.35});
+      grp.add(new THREE.Mesh(geo,mat));
+      normalize(grp); model=grp;
+      fileName.textContent='✅ Sample model loaded ('+countTris(grp).toLocaleString()+' triangles)';
+      enterBtn.disabled=false;
+    }
+
     function countTris(obj){
       let n=0; obj.traverse(m=>{ if(m.isMesh && m.geometry){ const g=m.geometry;
         n += g.index ? g.index.count/3 : (g.attributes.position ? g.attributes.position.count/3 : 0); }});
@@ -212,6 +227,13 @@
       cam.getWorldPosition(_cp); cam.getWorldDirection(_cd); placed.position.copy(_cp).add(_cd.multiplyScalar(0.6));
       arStatus.textContent='Floating in front of you. Pinch to rotate, two hands to zoom.'; }
     function tryPlace(){ if(reticle.visible) placeOnSurface(); else placeInAir(); }
+
+    // How close a pinch must be to the model to count as "grab to move".
+    const _box=new THREE.Box3(), _sph=new THREE.Sphere();
+    function grabRadius(){
+      _box.setFromObject(placed); _box.getBoundingSphere(_sph);
+      return Math.max(_sph.radius*1.3, 0.12);
+    }
 
     const _a=new THREE.Vector3(), _b=new THREE.Vector3();
     function pinch(hand,idx){
@@ -245,8 +267,17 @@
         }
       } else if(b0||b1){
         twoGrab=null; const p=b0?p0:p1;
-        if(!oneGrab){ oneGrab={last:p.point.clone()}; }
-        else{
+        if(!oneGrab){
+          // Pinch near the model → grab & move it. Pinch away from it → rotate.
+          if(p.point.distanceTo(placed.position) < grabRadius()){
+            oneGrab={mode:'move', offset:placed.position.clone().sub(p.point)};
+            arStatus.textContent='Moving — move your hand, release to drop it.';
+          } else {
+            oneGrab={mode:'rotate', last:p.point.clone()};
+          }
+        } else if(oneGrab.mode==='move'){
+          placed.position.copy(p.point).add(oneGrab.offset);   // follows the hand
+        } else {
           const dx=p.point.x-oneGrab.last.x, dy=p.point.y-oneGrab.last.y;
           placed.rotateOnWorldAxis(WORLD_Y, dx*ROT_SPEED);
           placed.rotateOnWorldAxis(WORLD_X,-dy*ROT_SPEED);
