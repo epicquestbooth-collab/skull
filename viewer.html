@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>MR Viewer — view any 3D file in Mixed Reality</title>
+  <style>
+    :root { --primary:#004E64; --glass:rgba(255,255,255,.55); --glass-b:rgba(255,255,255,.7); }
+    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+    html,body{margin:0;height:100%;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;color:#2b2f33;}
+    body{background:radial-gradient(circle at 30% 20%,#eaf1f4,#cdd7dd 70%);overflow:hidden;}
+    #landing{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;}
+    .card{width:min(560px,92vw);background:var(--glass);border:1px solid var(--glass-b);
+      backdrop-filter:blur(22px) saturate(140%);-webkit-backdrop-filter:blur(22px) saturate(140%);
+      border-radius:28px;box-shadow:0 20px 60px rgba(0,78,100,.18);padding:34px 30px;text-align:center;}
+    .card h1{margin:0 0 6px;font-size:26px;color:var(--primary);letter-spacing:-.02em;}
+    .card p{margin:0 0 20px;font-size:15px;opacity:.75;line-height:1.5;}
+    .btn{display:inline-flex;align-items:center;gap:10px;justify-content:center;width:100%;
+      padding:16px 20px;margin:8px 0;font-size:16px;font-weight:600;color:#fff;cursor:pointer;
+      background:linear-gradient(135deg,#006277,var(--primary));border:none;border-radius:16px;
+      box-shadow:0 10px 24px rgba(0,78,100,.3);transition:transform .18s,box-shadow .18s,opacity .18s;}
+    .btn:hover{transform:translateY(-2px);box-shadow:0 14px 30px rgba(0,78,100,.38);}
+    .btn:active{transform:translateY(0);}
+    .btn.secondary{background:rgba(255,255,255,.6);color:var(--primary);box-shadow:inset 0 0 0 1.5px rgba(0,78,100,.25);}
+    .btn[disabled]{opacity:.45;pointer-events:none;}
+    input[type=file]{display:none;}
+    #fileName{font-size:13px;opacity:.72;min-height:18px;margin:2px 0 6px;}
+    .gestures{margin:12px 0 4px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}
+    .g{background:rgba(255,255,255,.5);border-radius:14px;padding:10px 12px;font-size:12px;width:158px;}
+    .g b{display:block;color:var(--primary);font-size:20px;margin-bottom:2px;}
+    .hint{margin-top:12px;font-size:12.5px;opacity:.6;}
+    #arOverlay{position:fixed;left:0;right:0;bottom:0;display:none;padding:16px;gap:12px;
+      flex-direction:column;align-items:center;pointer-events:none;}
+    #arStatus{background:rgba(0,0,0,.55);color:#fff;padding:10px 16px;border-radius:14px;font-size:14px;}
+    #arOverlay .panel{pointer-events:auto;background:var(--glass);border:1px solid var(--glass-b);
+      backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-radius:20px;padding:10px 14px;
+      display:flex;gap:12px;align-items:center;box-shadow:0 10px 30px rgba(0,0,0,.2);}
+    #arOverlay .panel button{border:none;border-radius:12px;padding:10px 14px;font-weight:600;background:var(--primary);color:#fff;font-size:14px;}
+  </style>
+  <script type="importmap">
+  { "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }}
+  </script>
+</head>
+<body>
+  <div id="landing">
+    <div class="card">
+      <h1>MR Viewer</h1>
+      <p>View any 3D model in mixed reality on your Quest.<br/>Pick a file, then enter MR — it appears in your room and you control it with your hands.</p>
+
+      <label class="btn secondary" for="fileInput">📁 Choose a 3D file</label>
+      <input id="fileInput" type="file" accept=".glb,.gltf,.stl,.3mf,.obj,.ply" />
+      <div id="fileName"></div>
+
+      <button id="enterAR" class="btn" disabled>🥽 Enter Mixed Reality</button>
+
+      <div class="gestures">
+        <div class="g"><b>🤏</b>Pinch to place it (surface or mid-air)</div>
+        <div class="g"><b>🙌</b>Two hands: move apart/together to zoom</div>
+        <div class="g"><b>✋</b>One hand: move up/down to tilt, sideways to spin</div>
+      </div>
+      <div class="hint">Supports GLB · glTF · STL · 3MF · OBJ · PLY. Enable Hand Tracking on your Quest and set the controllers down.</div>
+    </div>
+  </div>
+
+  <div id="arOverlay">
+    <div id="arStatus">Pinch your fingers to place the model.</div>
+    <div class="panel">
+      <button id="rotL">⟲</button><button id="rotR">⟳</button>
+      <button id="tiltU">⤴</button><button id="tiltD">⤵</button>
+      <button id="smaller">－</button><button id="bigger">＋</button>
+      <button id="reset">Reset</button>
+    </div>
+  </div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { ARButton } from 'three/addons/webxr/ARButton.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+    import { ThreeMFLoader } from 'three/addons/loaders/3MFLoader.js';
+    import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+    import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
+    import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+
+    let renderer, scene, camera, reticle, hand0, hand1;
+    let hitTestSource=null, hitTestRequested=false;
+    let model=null, placed=null, baseScale=0.4;
+
+    let twoGrab=null, oneGrab=null, wasPinch=false;
+    const PINCH_ON=0.028, PINCH_OFF=0.045;
+    const pinchState=[false,false];
+    const WORLD_X=new THREE.Vector3(1,0,0), WORLD_Y=new THREE.Vector3(0,1,0);
+    const ROT_SPEED=9.0;
+
+    const landing=document.getElementById('landing');
+    const arOverlay=document.getElementById('arOverlay');
+    const arStatus=document.getElementById('arStatus');
+    const enterBtn=document.getElementById('enterAR');
+    const fileName=document.getElementById('fileName');
+
+    init();
+
+    function init(){
+      scene=new THREE.Scene();
+      camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,0.01,40);
+      scene.add(new THREE.HemisphereLight(0xffffff,0x555555,1.1));
+      const d=new THREE.DirectionalLight(0xffffff,1.2); d.position.set(1,2,1); scene.add(d);
+
+      renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+      renderer.setPixelRatio(devicePixelRatio); renderer.setSize(innerWidth,innerHeight);
+      renderer.xr.enabled=true; document.body.appendChild(renderer.domElement);
+      renderer.domElement.style.display='none';
+
+      const ring=new THREE.RingGeometry(0.07,0.09,32).rotateX(-Math.PI/2);
+      reticle=new THREE.Mesh(ring,new THREE.MeshBasicMaterial({color:0x33e0ff}));
+      reticle.matrixAutoUpdate=false; reticle.visible=false; scene.add(reticle);
+
+      const c0=renderer.xr.getController(0); c0.addEventListener('select',tryPlace); scene.add(c0);
+      const c1=renderer.xr.getController(1); c1.addEventListener('select',tryPlace); scene.add(c1);
+
+      const hmf=new XRHandModelFactory();
+      hand0=renderer.xr.getHand(0); hand0.add(hmf.createHandModel(hand0,'spheres')); scene.add(hand0);
+      hand1=renderer.xr.getHand(1); hand1.add(hmf.createHandModel(hand1,'spheres')); scene.add(hand1);
+
+      // 'immersive-ar' on Quest = passthrough MIXED REALITY (real room visible).
+      const arButton=ARButton.createButton(renderer,{
+        requiredFeatures:['hit-test'],
+        optionalFeatures:['local-floor','hand-tracking','dom-overlay'],
+        domOverlay:{root:arOverlay}});
+      arButton.style.display='none'; document.body.appendChild(arButton);
+      enterBtn.addEventListener('click',()=>arButton.click());
+
+      renderer.xr.addEventListener('sessionstart',()=>{
+        landing.style.display='none'; arOverlay.style.display='flex'; renderer.domElement.style.display='block';
+        setTimeout(()=>{ if(!placed) placeInAir(); }, 1500);});
+      renderer.xr.addEventListener('sessionend',()=>{
+        landing.style.display='flex'; arOverlay.style.display='none'; renderer.domElement.style.display='none';
+        hitTestRequested=false; hitTestSource=null; twoGrab=oneGrab=null;});
+
+      document.getElementById('fileInput').addEventListener('change',onFilePicked);
+      document.getElementById('rotL').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_Y,-Math.PI/12);});
+      document.getElementById('rotR').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_Y, Math.PI/12);});
+      document.getElementById('tiltU').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_X,-Math.PI/12);});
+      document.getElementById('tiltD').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_X, Math.PI/12);});
+      document.getElementById('smaller').addEventListener('click',()=>{ if(placed) placed.scale.multiplyScalar(0.85);});
+      document.getElementById('bigger').addEventListener('click',()=>{ if(placed) placed.scale.multiplyScalar(1.18);});
+      document.getElementById('reset').addEventListener('click',()=>{ if(placed){scene.remove(placed);placed=null;} arStatus.textContent='Pinch your fingers to place the model.';});
+
+      addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
+      renderer.setAnimationLoop(render);
+    }
+
+    async function onFilePicked(e){
+      const file=e.target.files[0]; if(!file) return;
+      fileName.textContent='Loading '+file.name+'…'; enterBtn.disabled=true;
+      // drop any previously loaded/placed model
+      if(placed){ scene.remove(placed); placed=null; }
+      model=null;
+      try{
+        const obj=await loadModel(file);
+        normalize(obj); model=obj;
+        fileName.textContent='✅ '+file.name+'  ('+countTris(obj).toLocaleString()+' triangles)';
+        enterBtn.disabled=false;
+      }catch(err){
+        fileName.textContent='⚠️ '+(err.message||err);
+      }
+    }
+
+    async function loadModel(file){
+      const url=URL.createObjectURL(file);
+      const ext=file.name.split('.').pop().toLowerCase();
+      try{
+        if(ext==='glb'||ext==='gltf'){ const g=await new GLTFLoader().loadAsync(url); return g.scene; }
+        if(ext==='stl'){ const geo=await new STLLoader().loadAsync(url); geo.computeVertexNormals(); return new THREE.Mesh(geo, defaultMat()); }
+        if(ext==='3mf'){ return await new ThreeMFLoader().loadAsync(url); }
+        if(ext==='obj'){ const o=await new OBJLoader().loadAsync(url); o.traverse(m=>{ if(m.isMesh && !m.material) m.material=defaultMat(); }); return o; }
+        if(ext==='ply'){ const geo=await new PLYLoader().loadAsync(url); geo.computeVertexNormals();
+          const mat=defaultMat(); if(geo.hasAttribute('color')) mat.vertexColors=true; return new THREE.Mesh(geo, mat); }
+        throw new Error('Unsupported format: .'+ext);
+      } finally { URL.revokeObjectURL(url); }
+    }
+
+    function defaultMat(){ return new THREE.MeshStandardMaterial({color:0xc7ccd1, metalness:0.1, roughness:0.6}); }
+
+    function countTris(obj){
+      let n=0; obj.traverse(m=>{ if(m.isMesh && m.geometry){ const g=m.geometry;
+        n += g.index ? g.index.count/3 : (g.attributes.position ? g.attributes.position.count/3 : 0); }});
+      return Math.round(n);
+    }
+
+    function normalize(obj){
+      const box=new THREE.Box3().setFromObject(obj);
+      const size=new THREE.Vector3(); box.getSize(size);
+      const center=new THREE.Vector3(); box.getCenter(center);
+      obj.position.sub(center);
+      obj.userData.fit=1/(Math.max(size.x,size.y,size.z)||1);
+    }
+
+    const _cp=new THREE.Vector3(), _cd=new THREE.Vector3();
+    function ensurePlaced(){
+      if(!model) return false;
+      if(!placed){ placed=model.clone(true); placed.userData.fit=model.userData.fit;
+        placed.scale.setScalar(baseScale*placed.userData.fit); scene.add(placed); }
+      return true;
+    }
+    function placeOnSurface(){ if(!ensurePlaced())return; placed.position.setFromMatrixPosition(reticle.matrix);
+      arStatus.textContent='On the surface. Pinch one hand & move to tilt/spin.'; }
+    function placeInAir(){ if(!ensurePlaced())return; const cam=renderer.xr.getCamera();
+      cam.getWorldPosition(_cp); cam.getWorldDirection(_cd); placed.position.copy(_cp).add(_cd.multiplyScalar(0.6));
+      arStatus.textContent='Floating in front of you. Pinch to rotate, two hands to zoom.'; }
+    function tryPlace(){ if(reticle.visible) placeOnSurface(); else placeInAir(); }
+
+    const _a=new THREE.Vector3(), _b=new THREE.Vector3();
+    function pinch(hand,idx){
+      const it=hand.joints && hand.joints['index-finger-tip'];
+      const tt=hand.joints && hand.joints['thumb-tip'];
+      if(!it||!tt){ pinchState[idx]=false; return null; }
+      it.getWorldPosition(_a); tt.getWorldPosition(_b);
+      const dist=_a.distanceTo(_b);
+      if(pinchState[idx]){ if(dist>PINCH_OFF) pinchState[idx]=false; }
+      else { if(dist<PINCH_ON) pinchState[idx]=true; }
+      return { pinching:pinchState[idx], point:_a.clone().lerp(_b,0.5) };
+    }
+
+    function handleGestures(){
+      const p0=pinch(hand0,0), p1=pinch(hand1,1);
+      const b0=!!(p0&&p0.pinching), b1=!!(p1&&p1.pinching);
+
+      if(!placed){
+        if((b0||b1)&&!wasPinch) tryPlace();
+        twoGrab=oneGrab=null; wasPinch=b0||b1; return;
+      }
+      if(b0&&b1){
+        oneGrab=null;
+        const dx=p1.point.x-p0.point.x, dz=p1.point.z-p0.point.z;
+        const dist=Math.hypot(dx,dz)||1e-4; const ang=Math.atan2(dz,dx);
+        if(!twoGrab){ twoGrab={dist,ang,scale:placed.scale.x}; }
+        else{
+          placed.scale.setScalar(THREE.MathUtils.clamp(twoGrab.scale*(dist/twoGrab.dist),0.01,6));
+          let dA=ang-twoGrab.ang; if(dA>Math.PI)dA-=2*Math.PI; else if(dA<-Math.PI)dA+=2*Math.PI;
+          placed.rotateOnWorldAxis(WORLD_Y,-dA); twoGrab.ang=ang;
+        }
+      } else if(b0||b1){
+        twoGrab=null; const p=b0?p0:p1;
+        if(!oneGrab){ oneGrab={last:p.point.clone()}; }
+        else{
+          const dx=p.point.x-oneGrab.last.x, dy=p.point.y-oneGrab.last.y;
+          placed.rotateOnWorldAxis(WORLD_Y, dx*ROT_SPEED);
+          placed.rotateOnWorldAxis(WORLD_X,-dy*ROT_SPEED);
+          oneGrab.last.copy(p.point);
+        }
+      } else { twoGrab=null; oneGrab=null; }
+      wasPinch=b0||b1;
+    }
+
+    function render(_,frame){
+      if(frame){
+        const refSpace=renderer.xr.getReferenceSpace(); const session=renderer.xr.getSession();
+        if(!hitTestRequested){
+          session.requestReferenceSpace('viewer').then(v=>session.requestHitTestSource({space:v}).then(s=>hitTestSource=s));
+          hitTestRequested=true;
+        }
+        if(hitTestSource){
+          const hits=frame.getHitTestResults(hitTestSource);
+          if(hits.length){ const p=hits[0].getPose(refSpace); reticle.visible=true; reticle.matrix.fromArray(p.transform.matrix);}
+          else reticle.visible=false;
+        }
+        handleGestures();
+      }
+      renderer.render(scene,camera);
+    }
+  </script>
+</body>
+</html>
