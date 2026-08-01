@@ -44,12 +44,12 @@
   <div id="landing">
     <div class="card">
       <h1>Skull — MR Viewer</h1>
-      <p>The 3D skull is loaded. Put on your Quest and press the button — you'll control it with your hands.</p>
+      <p>The 3D skull is loaded. Press the button — it appears floating in front of you, and you control it with your hands.</p>
       <button id="enterAR" class="btn">🕶️ Enter AR (passthrough)</button>
       <div class="gestures">
         <div class="g"><b>🤏</b>Pinch to place it on a surface</div>
         <div class="g"><b>🙌</b>Pinch both hands, move apart/together to zoom</div>
-        <div class="g"><b>🔄</b>Pinch both hands & twist to rotate</div>
+        <div class="g"><b>✋</b>Pinch ONE hand & move: up/down tilts, left/right spins</div>
       </div>
       <div class="hint">Tip: enable Hand Tracking on your Quest (Settings → Movement tracking). Put the controllers down and just use your hands.</div>
     </div>
@@ -59,6 +59,7 @@
     <div id="arStatus">Pinch your fingers to place the skull on a surface.</div>
     <div class="panel">
       <button id="rotL">⟲</button><button id="rotR">⟳</button>
+      <button id="tiltU">⤴</button><button id="tiltD">⤵</button>
       <button id="smaller">－</button><button id="bigger">＋</button>
       <button id="reset">Reset</button>
     </div>
@@ -82,6 +83,8 @@
     let twoGrab=null, oneGrab=null, wasPinch=false;
     const PINCH_ON=0.028, PINCH_OFF=0.045;   // metres (hysteresis)
     const pinchState=[false,false];
+    const WORLD_X=new THREE.Vector3(1,0,0), WORLD_Y=new THREE.Vector3(0,1,0);
+    const ROT_SPEED=9.0;                      // radians per metre of hand travel
 
     const landing=document.getElementById('landing');
     const arOverlay=document.getElementById('arOverlay');
@@ -122,14 +125,18 @@
       document.getElementById('enterAR').addEventListener('click',()=>arButton.click());
 
       renderer.xr.addEventListener('sessionstart',()=>{
-        landing.style.display='none'; arOverlay.style.display='flex'; renderer.domElement.style.display='block';});
+        landing.style.display='none'; arOverlay.style.display='flex'; renderer.domElement.style.display='block';
+        // Auto-show the skull floating in front so it's visible in the air right away.
+        setTimeout(()=>{ if(!placed) placeInAir(); }, 1500);});
       renderer.xr.addEventListener('sessionend',()=>{
         landing.style.display='flex'; arOverlay.style.display='none'; renderer.domElement.style.display='none';
         hitTestRequested=false; hitTestSource=null; twoGrab=oneGrab=null;});
 
       // On-screen fallback controls
-      document.getElementById('rotL').addEventListener('click',()=>{ if(placed) placed.rotation.y-=Math.PI/12;});
-      document.getElementById('rotR').addEventListener('click',()=>{ if(placed) placed.rotation.y+=Math.PI/12;});
+      document.getElementById('rotL').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_Y,-Math.PI/12);});
+      document.getElementById('rotR').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_Y, Math.PI/12);});
+      document.getElementById('tiltU').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_X,-Math.PI/12);});
+      document.getElementById('tiltD').addEventListener('click',()=>{ if(placed) placed.rotateOnWorldAxis(WORLD_X, Math.PI/12);});
       document.getElementById('smaller').addEventListener('click',()=>{ if(placed) placed.scale.multiplyScalar(0.85);});
       document.getElementById('bigger').addEventListener('click',()=>{ if(placed) placed.scale.multiplyScalar(1.18);});
       document.getElementById('reset').addEventListener('click',()=>{ if(placed){scene.remove(placed);placed=null;} arStatus.textContent='Pinch your fingers to place the skull on a surface.';});
@@ -155,14 +162,29 @@
       obj.userData.fit=1/(Math.max(size.x,size.y,size.z)||1);
     }
 
-    function tryPlace(){ if(reticle.visible) doPlace(); }
-    function doPlace(){
-      if(!model) return;
-      if(!placed){ placed=model.clone(true); placed.userData.fit=model.userData.fit; scene.add(placed); }
-      placed.position.setFromMatrixPosition(reticle.matrix);
-      placed.scale.setScalar(baseScale*placed.userData.fit);
-      arStatus.textContent='Placed! Pinch both hands and move them to zoom & rotate.';
+    const _cp=new THREE.Vector3(), _cd=new THREE.Vector3();
+    function ensurePlaced(){
+      if(!model) return false;
+      if(!placed){
+        placed=model.clone(true); placed.userData.fit=model.userData.fit;
+        placed.scale.setScalar(baseScale*placed.userData.fit); scene.add(placed);
+      }
+      return true;
     }
+    function placeOnSurface(){
+      if(!ensurePlaced()) return;
+      placed.position.setFromMatrixPosition(reticle.matrix);
+      arStatus.textContent='On the surface. Pinch one hand & move up/down to tilt, sideways to spin.';
+    }
+    function placeInAir(){
+      if(!ensurePlaced()) return;
+      const cam=renderer.xr.getCamera();
+      cam.getWorldPosition(_cp); cam.getWorldDirection(_cd);
+      placed.position.copy(_cp).add(_cd.multiplyScalar(0.6));   // ~0.6 m in front of you
+      arStatus.textContent='Floating in front of you. Pinch one hand & move to rotate, two hands to zoom.';
+    }
+    // Aiming at a surface drops it there; otherwise it floats in mid-air.
+    function tryPlace(){ if(reticle.visible) placeOnSurface(); else placeInAir(); }
 
     // --- hand pinch detection ---
     const _a=new THREE.Vector3(), _b=new THREE.Vector3();
@@ -183,27 +205,37 @@
       const b0=!!(p0&&p0.pinching), b1=!!(p1&&p1.pinching);
 
       if(!placed){
-        if((b0||b1) && !wasPinch && reticle.visible) doPlace();
+        if((b0||b1) && !wasPinch) tryPlace();   // surface if aiming at one, else mid-air
         twoGrab=oneGrab=null; wasPinch=b0||b1; return;
       }
 
-      if(b0 && b1){                       // TWO HANDS: zoom + rotate
+      if(b0 && b1){                       // TWO HANDS: zoom + side-spin
         oneGrab=null;
         const dx=p1.point.x-p0.point.x, dz=p1.point.z-p0.point.z;
         const dist=Math.hypot(dx,dz) || 1e-4;
         const ang=Math.atan2(dz,dx);
         if(!twoGrab){
-          twoGrab={dist, ang, scale:placed.scale.x, rotY:placed.rotation.y};
+          twoGrab={dist, ang, scale:placed.scale.x};
         }else{
-          const s=THREE.MathUtils.clamp(twoGrab.scale*(dist/twoGrab.dist), 0.01, 6);
-          placed.scale.setScalar(s);
-          placed.rotation.y = twoGrab.rotY - (ang - twoGrab.ang);
+          // zoom: scale relative to the distance when the grab started
+          placed.scale.setScalar(THREE.MathUtils.clamp(twoGrab.scale*(dist/twoGrab.dist), 0.01, 6));
+          // side-spin: apply the change in angle incrementally around the up axis
+          let dAng=ang-twoGrab.ang;
+          if(dAng>Math.PI) dAng-=2*Math.PI; else if(dAng<-Math.PI) dAng+=2*Math.PI;
+          placed.rotateOnWorldAxis(WORLD_Y, -dAng);
+          twoGrab.ang=ang;
         }
-      } else if(b0 || b1){                 // ONE HAND: spin
+      } else if(b0 || b1){                 // ONE HAND: free rotate (up/down + left/right)
         twoGrab=null;
         const p=b0?p0:p1;
-        if(!oneGrab) oneGrab={x:p.point.x, rotY:placed.rotation.y};
-        else placed.rotation.y = oneGrab.rotY + (p.point.x-oneGrab.x)*6.0;
+        if(!oneGrab){ oneGrab={last:p.point.clone()}; }
+        else{
+          const dx=p.point.x-oneGrab.last.x;   // horizontal hand travel -> spin
+          const dy=p.point.y-oneGrab.last.y;   // vertical hand travel   -> tilt up/down
+          placed.rotateOnWorldAxis(WORLD_Y, dx*ROT_SPEED);
+          placed.rotateOnWorldAxis(WORLD_X, -dy*ROT_SPEED);
+          oneGrab.last.copy(p.point);
+        }
       } else {                            // released
         twoGrab=null; oneGrab=null;
       }
