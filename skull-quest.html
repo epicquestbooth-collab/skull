@@ -10,7 +10,7 @@
     html,body{margin:0;height:100%;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;color:#2b2f33;}
     body{background:radial-gradient(circle at 30% 20%,#eaf1f4,#cdd7dd 70%);overflow:hidden;}
     #landing{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;}
-    .card{width:min(520px,92vw);background:var(--glass);border:1px solid var(--glass-b);
+    .card{width:min(540px,92vw);background:var(--glass);border:1px solid var(--glass-b);
       backdrop-filter:blur(22px) saturate(140%);-webkit-backdrop-filter:blur(22px) saturate(140%);
       border-radius:28px;box-shadow:0 20px 60px rgba(0,78,100,.18);padding:34px 30px;text-align:center;}
     .card h1{margin:0 0 6px;font-size:26px;color:var(--primary);letter-spacing:-.02em;}
@@ -21,16 +21,17 @@
       box-shadow:0 10px 24px rgba(0,78,100,.3);transition:transform .18s,box-shadow .18s,opacity .18s;}
     .btn:hover{transform:translateY(-2px);box-shadow:0 14px 30px rgba(0,78,100,.38);}
     .btn:active{transform:translateY(0);}
-    .btn[disabled]{opacity:.5;pointer-events:none;}
-    .hint{margin-top:16px;font-size:12.5px;opacity:.6;}
+    .gestures{margin:14px 0 4px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap;}
+    .g{background:rgba(255,255,255,.5);border-radius:14px;padding:10px 12px;font-size:12px;width:150px;}
+    .g b{display:block;color:var(--primary);font-size:20px;margin-bottom:2px;}
+    .hint{margin-top:14px;font-size:12.5px;opacity:.6;}
     #arOverlay{position:fixed;left:0;right:0;bottom:0;display:none;padding:16px;gap:12px;
       flex-direction:column;align-items:center;pointer-events:none;}
     #arStatus{background:rgba(0,0,0,.55);color:#fff;padding:10px 16px;border-radius:14px;font-size:14px;}
     #arOverlay .panel{pointer-events:auto;background:var(--glass);border:1px solid var(--glass-b);
-      backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-radius:20px;padding:12px 16px;
-      display:flex;gap:14px;align-items:center;box-shadow:0 10px 30px rgba(0,0,0,.2);}
-    #arOverlay .panel button{border:none;border-radius:12px;padding:12px 16px;font-weight:600;background:var(--primary);color:#fff;font-size:15px;}
-    label.slider{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--primary);font-weight:600;}
+      backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-radius:20px;padding:10px 14px;
+      display:flex;gap:12px;align-items:center;box-shadow:0 10px 30px rgba(0,0,0,.2);}
+    #arOverlay .panel button{border:none;border-radius:12px;padding:10px 14px;font-weight:600;background:var(--primary);color:#fff;font-size:14px;}
   </style>
   <script type="importmap">
   { "imports": {
@@ -43,17 +44,23 @@
   <div id="landing">
     <div class="card">
       <h1>Skull — MR Viewer</h1>
-      <p>The 3D skull is loaded and ready.<br/>Put on your Quest and press the button below.</p>
+      <p>The 3D skull is loaded. Put on your Quest and press the button — you'll control it with your hands.</p>
       <button id="enterAR" class="btn">🕶️ Enter AR (passthrough)</button>
-      <div class="hint">Look at your floor or a table, then pull the trigger to place the skull. Use the panel to rotate and resize it.</div>
+      <div class="gestures">
+        <div class="g"><b>🤏</b>Pinch to place it on a surface</div>
+        <div class="g"><b>🙌</b>Pinch both hands, move apart/together to zoom</div>
+        <div class="g"><b>🔄</b>Pinch both hands & twist to rotate</div>
+      </div>
+      <div class="hint">Tip: enable Hand Tracking on your Quest (Settings → Movement tracking). Put the controllers down and just use your hands.</div>
     </div>
   </div>
 
   <div id="arOverlay">
-    <div id="arStatus">Point at a surface and press the trigger to place.</div>
+    <div id="arStatus">Pinch your fingers to place the skull on a surface.</div>
     <div class="panel">
-      <label class="slider">Size <input id="scale" type="range" min="0.05" max="3" step="0.01" value="0.4" /></label>
-      <button id="rotL">⟲</button><button id="rotR">⟳</button><button id="reset">Reset</button>
+      <button id="rotL">⟲</button><button id="rotR">⟳</button>
+      <button id="smaller">－</button><button id="bigger">＋</button>
+      <button id="reset">Reset</button>
     </div>
   </div>
 
@@ -64,10 +71,17 @@
     import * as THREE from 'three';
     import { ARButton } from 'three/addons/webxr/ARButton.js';
     import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 
     let renderer, scene, camera, reticle;
+    let hand0, hand1;
     let hitTestSource=null, hitTestRequested=false;
     let model=null, placed=null, baseScale=0.4;
+
+    // gesture state
+    let twoGrab=null, oneGrab=null, wasPinch=false;
+    const PINCH_ON=0.028, PINCH_OFF=0.045;   // metres (hysteresis)
+    const pinchState=[false,false];
 
     const landing=document.getElementById('landing');
     const arOverlay=document.getElementById('arOverlay');
@@ -91,11 +105,18 @@
       reticle=new THREE.Mesh(ring,new THREE.MeshBasicMaterial({color:0x33e0ff}));
       reticle.matrixAutoUpdate=false; reticle.visible=false; scene.add(reticle);
 
-      const controller=renderer.xr.getController(0);
-      controller.addEventListener('select',onSelect); scene.add(controller);
+      // Controllers (in case controllers are used instead of hands)
+      const c0=renderer.xr.getController(0); c0.addEventListener('select',tryPlace); scene.add(c0);
+      const c1=renderer.xr.getController(1); c1.addEventListener('select',tryPlace); scene.add(c1);
+
+      // Hands + simple sphere joint visuals (procedural, no asset downloads)
+      const hmf=new XRHandModelFactory();
+      hand0=renderer.xr.getHand(0); hand0.add(hmf.createHandModel(hand0,'spheres')); scene.add(hand0);
+      hand1=renderer.xr.getHand(1); hand1.add(hmf.createHandModel(hand1,'spheres')); scene.add(hand1);
 
       const arButton=ARButton.createButton(renderer,{
-        requiredFeatures:['hit-test'], optionalFeatures:['local-floor','dom-overlay'],
+        requiredFeatures:['hit-test'],
+        optionalFeatures:['local-floor','hand-tracking','dom-overlay'],
         domOverlay:{root:arOverlay}});
       arButton.style.display='none'; document.body.appendChild(arButton);
       document.getElementById('enterAR').addEventListener('click',()=>arButton.click());
@@ -104,13 +125,14 @@
         landing.style.display='none'; arOverlay.style.display='flex'; renderer.domElement.style.display='block';});
       renderer.xr.addEventListener('sessionend',()=>{
         landing.style.display='flex'; arOverlay.style.display='none'; renderer.domElement.style.display='none';
-        hitTestRequested=false; hitTestSource=null;});
+        hitTestRequested=false; hitTestSource=null; twoGrab=oneGrab=null;});
 
-      document.getElementById('scale').addEventListener('input',e=>{
-        baseScale=parseFloat(e.target.value); if(placed) placed.scale.setScalar(baseScale*placed.userData.fit);});
+      // On-screen fallback controls
       document.getElementById('rotL').addEventListener('click',()=>{ if(placed) placed.rotation.y-=Math.PI/12;});
       document.getElementById('rotR').addEventListener('click',()=>{ if(placed) placed.rotation.y+=Math.PI/12;});
-      document.getElementById('reset').addEventListener('click',()=>{ if(placed){scene.remove(placed);placed=null;} arStatus.textContent='Point at a surface and press the trigger to place.';});
+      document.getElementById('smaller').addEventListener('click',()=>{ if(placed) placed.scale.multiplyScalar(0.85);});
+      document.getElementById('bigger').addEventListener('click',()=>{ if(placed) placed.scale.multiplyScalar(1.18);});
+      document.getElementById('reset').addEventListener('click',()=>{ if(placed){scene.remove(placed);placed=null;} arStatus.textContent='Pinch your fingers to place the skull on a surface.';});
 
       addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight);});
       renderer.setAnimationLoop(render);
@@ -120,29 +142,72 @@
       const bin=atob(b64.trim()); const len=bin.length; const bytes=new Uint8Array(len);
       for(let i=0;i<len;i++) bytes[i]=bin.charCodeAt(i); return bytes.buffer;
     }
-
     function loadEmbeddedModel(){
-      const b64=document.getElementById('modelData').textContent;
-      const buf=base64ToArrayBuffer(b64);
+      const buf=base64ToArrayBuffer(document.getElementById('modelData').textContent);
       new GLTFLoader().parse(buf,'',(gltf)=>{ model=gltf.scene; normalize(model); },
         (err)=>{ arStatus.textContent='Model failed to load: '+err; });
     }
-
     function normalize(obj){
       const box=new THREE.Box3().setFromObject(obj);
       const size=new THREE.Vector3(); box.getSize(size);
       const center=new THREE.Vector3(); box.getCenter(center);
       obj.position.sub(center);
-      const longest=Math.max(size.x,size.y,size.z)||1;
-      obj.userData.fit=1/longest;
+      obj.userData.fit=1/(Math.max(size.x,size.y,size.z)||1);
     }
 
-    function onSelect(){
-      if(!reticle.visible||!model) return;
+    function tryPlace(){ if(reticle.visible) doPlace(); }
+    function doPlace(){
+      if(!model) return;
       if(!placed){ placed=model.clone(true); placed.userData.fit=model.userData.fit; scene.add(placed); }
       placed.position.setFromMatrixPosition(reticle.matrix);
       placed.scale.setScalar(baseScale*placed.userData.fit);
-      arStatus.textContent='Placed. Use the panel to rotate & resize.';
+      arStatus.textContent='Placed! Pinch both hands and move them to zoom & rotate.';
+    }
+
+    // --- hand pinch detection ---
+    const _a=new THREE.Vector3(), _b=new THREE.Vector3();
+    function pinch(hand, idx){
+      const it=hand.joints && hand.joints['index-finger-tip'];
+      const tt=hand.joints && hand.joints['thumb-tip'];
+      if(!it || !tt) { pinchState[idx]=false; return null; }
+      it.getWorldPosition(_a); tt.getWorldPosition(_b);
+      const dist=_a.distanceTo(_b);
+      // hysteresis so a pinch doesn't flicker
+      if(pinchState[idx]) { if(dist>PINCH_OFF) pinchState[idx]=false; }
+      else { if(dist<PINCH_ON) pinchState[idx]=true; }
+      return { pinching:pinchState[idx], point:_a.clone().lerp(_b,0.5) };
+    }
+
+    function handleGestures(){
+      const p0=pinch(hand0,0), p1=pinch(hand1,1);
+      const b0=!!(p0&&p0.pinching), b1=!!(p1&&p1.pinching);
+
+      if(!placed){
+        if((b0||b1) && !wasPinch && reticle.visible) doPlace();
+        twoGrab=oneGrab=null; wasPinch=b0||b1; return;
+      }
+
+      if(b0 && b1){                       // TWO HANDS: zoom + rotate
+        oneGrab=null;
+        const dx=p1.point.x-p0.point.x, dz=p1.point.z-p0.point.z;
+        const dist=Math.hypot(dx,dz) || 1e-4;
+        const ang=Math.atan2(dz,dx);
+        if(!twoGrab){
+          twoGrab={dist, ang, scale:placed.scale.x, rotY:placed.rotation.y};
+        }else{
+          const s=THREE.MathUtils.clamp(twoGrab.scale*(dist/twoGrab.dist), 0.01, 6);
+          placed.scale.setScalar(s);
+          placed.rotation.y = twoGrab.rotY - (ang - twoGrab.ang);
+        }
+      } else if(b0 || b1){                 // ONE HAND: spin
+        twoGrab=null;
+        const p=b0?p0:p1;
+        if(!oneGrab) oneGrab={x:p.point.x, rotY:placed.rotation.y};
+        else placed.rotation.y = oneGrab.rotY + (p.point.x-oneGrab.x)*6.0;
+      } else {                            // released
+        twoGrab=null; oneGrab=null;
+      }
+      wasPinch=b0||b1;
     }
 
     function render(_,frame){
@@ -157,6 +222,7 @@
           if(hits.length){ const p=hits[0].getPose(refSpace); reticle.visible=true; reticle.matrix.fromArray(p.transform.matrix);}
           else reticle.visible=false;
         }
+        handleGestures();
       }
       renderer.render(scene,camera);
     }
